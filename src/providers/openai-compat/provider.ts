@@ -33,8 +33,10 @@ export class OpenAICompatibleProvider implements Provider {
                     { role: "user", content: prompt },
                 ],
                 temperature: options.temperature,
-                stream: false,
                 ...this.settings.extraParams,
+                // requestUrl() cannot consume SSE streams, so stream:false
+                // must win against any extraParams override.
+                stream: false,
             }),
             throw: false,
         });
@@ -85,11 +87,11 @@ export class OpenAICompatibleProvider implements Provider {
         if (!this.settings.baseUrl || !this.settings.apiKey) {
             return false;
         }
-        const model = this.settings.models[0];
-        if (!model) {
-            console.error("Inscribe: openai-compat connectionTest requires at least one configured model");
-            return false;
-        }
+        // connectionTest runs before fetchModels has populated the model
+        // list, so models[0] may be undefined. Fall back to a placeholder —
+        // a 4xx "model not found" still proves baseUrl + apiKey reach a
+        // working chat/completions endpoint.
+        const model = this.settings.models[0] ?? "inscribe-connection-test";
 
         try {
             const response = await requestUrl({
@@ -104,7 +106,14 @@ export class OpenAICompatibleProvider implements Provider {
                 }),
                 throw: false,
             });
-            if (response.status >= 200 && response.status < 300) {
+            // 401/403 = auth failure (real problem). 5xx = transient/unreachable.
+            // Anything else (200s, or a 400 "model not found") proves the
+            // endpoint is reachable and the credentials work.
+            if (response.status === 401 || response.status === 403) {
+                console.error("Inscribe: openai-compat connection test auth failure", response.status, response.text);
+                return false;
+            }
+            if (response.status >= 200 && response.status < 500) {
                 return true;
             }
             console.error("Inscribe: openai-compat connection test failed", response.status, response.text);
